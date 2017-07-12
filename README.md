@@ -1,4 +1,4 @@
-# Redis-Dialer
+# Redis-Dialer 0.1.0
 > Redis CMD funcs library and RESP client
 
 ### Methods
