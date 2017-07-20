@@ -9,7 +9,7 @@ var redisHost string
 
 // Dialer ...
 type Dialer struct {
-	Resp resp
+	Resp *RESP
 }
 
 // GetDialer ...
@@ -60,6 +60,9 @@ func (d *Dialer) EXPIRE(key string, second int) (int64, error) {
 //HGETALL key
 func (d *Dialer) HGETALL(key string) (map[string]interface{}, error) {
 	result, err := d.Resp.cmd([]string{"HGETALL", key})
+	if err != nil {
+		return nil, err
+	}
 	data := map[string]interface{}{}
 	for i := 0; i < len(result.([]interface{})); i += 2 {
 		key := result.([]interface{})[i].(string)

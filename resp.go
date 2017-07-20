@@ -6,93 +6,104 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 )
 
-type resp struct {
+// RESP ...
+type RESP struct {
 	Conn     net.Conn
-	WBuf     chan []byte
-	RBuf     []byte
-	ioBuf    *ioBuf
+	wBuf     chan uint32
+	rBuf     []byte
+	ioBuf    [100000]*ioBuf
 	i        uint32
-	j        uint32
+	mutex    *sync.Mutex
 	TimeoutR time.Duration
 	TimeoutW time.Duration
 }
 
 type ioBuf struct {
-	buf [100000](chan []byte)
-	err [100000](chan error)
+	cmd []byte
+	buf (chan []byte)
+	err (chan error)
 }
 
 const crlf = "\r\n"
 
-func newRESP(url string) (r resp, err error) {
-	r.Conn, err = net.DialTimeout("tcp", url, 5*time.Second)
+func newRESP(url string) (*RESP, error) {
+	conn, err := net.DialTimeout("tcp", url, 5*time.Second)
 	if err != nil {
-		return r, err
+		return nil, err
 	}
-	r.WBuf = make(chan []byte)
-	r.RBuf = make([]byte, 8192)
-	r.ioBuf = &ioBuf{}
-	r.i, r.j = 0, 0
-	r.TimeoutW = 1 * time.Second
-	r.TimeoutR = 2 * time.Second
+
+	r := RESP{
+		Conn:     conn,
+		wBuf:     make(chan uint32),
+		rBuf:     make([]byte, 65536),
+		i:        0,
+		mutex:    new(sync.Mutex),
+		TimeoutW: 1 * time.Second,
+		TimeoutR: 2 * time.Second,
+	}
 
 	go r.listen()
-	return r, nil
+	return &r, nil
 }
 
-func (r *resp) cmd(args []string) (data interface{}, err error) {
+func (r *RESP) cmd(args []string) (data interface{}, err error) {
+	r.mutex.Lock()
 	i := r.i
 	r.i++
 	if r.i == 100000 {
 		r.i = 0
 	}
-	r.ioBuf.buf[i] = make(chan []byte)
-	r.ioBuf.err[i] = make(chan error)
-	go r.queueCmd(i, args)
+	r.mutex.Unlock()
+
+	cmd := []byte("*" + strconv.Itoa(len(args)) + crlf)
+	for _, v := range args {
+		cmd = append(cmd, []byte("$"+strconv.Itoa(len([]byte(v)))+crlf)...)
+		cmd = append(cmd, []byte(v+crlf)...)
+	}
+
+	r.ioBuf[i] = &ioBuf{
+		buf: make(chan []byte),
+		err: make(chan error),
+		cmd: cmd,
+	}
+
+	r.wBuf <- i
+
 	select {
-	case err = <-r.ioBuf.err[i]:
-	case buf := <-r.ioBuf.buf[i]:
+	case err = <-r.ioBuf[i].err:
+	case buf := <-r.ioBuf[i].buf:
 		data, err = decoder(buf)
 	}
-	r.ioBuf.buf[i] = make(chan []byte)
-	r.ioBuf.err[i] = make(chan error)
+	r.ioBuf[i].cmd = nil
+	r.ioBuf[i].buf = nil
+	r.ioBuf[i].err = nil
+
 	return data, err
 }
 
-func (r *resp) queueCmd(i uint32, args []string) {
-	buf := []byte("*" + strconv.Itoa(len(args)) + crlf)
-	for _, v := range args {
-		buf = append(buf, []byte("$"+strconv.Itoa(len([]byte(v)))+crlf)...)
-		buf = append(buf, []byte(v+crlf)...)
-	}
-	r.WBuf <- buf
-}
-
-func (r *resp) listen() {
+func (r *RESP) listen() {
 	for {
-		cmd := <-r.WBuf
-		j := r.j
-		r.j++
-		if r.j == 100000 {
-			r.j = 0
-		}
+		i := <-r.wBuf
+
 		timer := time.Now().Add(r.TimeoutW)
 		r.Conn.SetWriteDeadline(timer)
-		_, err := r.Conn.Write(cmd)
+		_, err := r.Conn.Write(r.ioBuf[i].cmd)
 		if err != nil {
-			r.ioBuf.err[j] <- err
+			r.ioBuf[i].err <- err
 			return
 		}
+
 		timer = time.Now().Add(r.TimeoutR)
 		r.Conn.SetReadDeadline(timer)
-		n, err := r.Conn.Read(r.RBuf)
+		n, err := r.Conn.Read(r.rBuf)
 		if err != nil {
-			r.ioBuf.err[j] <- err
+			r.ioBuf[i].err <- err
 		}
-		r.ioBuf.buf[j] <- r.RBuf[:n]
+		r.ioBuf[i].buf <- r.rBuf[:n]
 	}
 }
 
@@ -137,7 +148,10 @@ func analyzer(scanner *bufio.Scanner) (result interface{}, err error) {
 		if len == "-1" {
 			result = nil
 		}
-		num, _ := strconv.ParseInt(len, 10, 32)
+		num, err := strconv.ParseInt(len, 10, 32)
+		if err != nil {
+			return nil, err
+		}
 		result = make([]interface{}, num)
 		for i := range result.([]interface{}) {
 			result.([]interface{})[i], _ = analyzer(scanner)
