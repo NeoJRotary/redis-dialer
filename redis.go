@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 )
@@ -26,6 +27,27 @@ func (d *Dialer) Close() {
 	d.Resp.Conn.Close()
 }
 
+// CMD str...
+func (d *Dialer) CMD(args ...string) (interface{}, error) {
+	result, err := d.Resp.cmd(args)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// PIPELINE str...
+func (d *Dialer) PIPELINE(cmds [][]string) ([]interface{}, error) {
+	result, err := d.Resp.pipe(cmds)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) != len(cmds) {
+		return nil, errors.New("incorrect RESP reponse length")
+	}
+	return result, nil
+}
+
 // HMSET key object
 func (d *Dialer) HMSET(key string, obj map[string]interface{}) (string, error) {
 	cmd := []string{"HMSET", key}
@@ -42,6 +64,15 @@ func (d *Dialer) HMSET(key string, obj map[string]interface{}) (string, error) {
 // HGET key field
 func (d *Dialer) HGET(key string, field string) (interface{}, error) {
 	result, err := d.Resp.cmd(append([]string{"HGET"}, key, field))
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// HMGET key field
+func (d *Dialer) HMGET(key string, field ...string) (interface{}, error) {
+	result, err := d.Resp.cmd(append([]string{"HMGET", key}, field...))
 	if err != nil {
 		return nil, err
 	}
@@ -134,6 +165,23 @@ func (d *Dialer) ZRANGE(key string, start int, stop int, WITHSCORES bool) ([]int
 	return result.([]interface{}), err
 }
 
+// ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]
+func (d *Dialer) ZRANGEBYSCORE(key string, min string, max string, WITHSCORES bool, LIMIT []int) ([]interface{}, error) {
+	cmd := []string{"ZRANGEBYSCORE", key, min, max}
+	if WITHSCORES {
+		cmd = append(cmd, "WITHSCORES")
+	}
+	if LIMIT != nil {
+		if len(LIMIT) != 2 {
+			return nil, errors.New("LIMIT length should be 2 [offset, count]")
+		}
+		cmd = append(cmd, "LIMIT", strconv.Itoa(LIMIT[0]), strconv.Itoa(LIMIT[1]))
+	}
+	result, err := d.Resp.cmd(cmd)
+
+	return result.([]interface{}), err
+}
+
 // ZSCORE key member
 func (d *Dialer) ZSCORE(key string, member string) (interface{}, error) {
 	cmd := []string{"ZSCORE", key, member}
@@ -177,4 +225,24 @@ func (d *Dialer) LRANGE(key string, start int, stop int) ([]interface{}, error) 
 		return nil, err
 	}
 	return result.([]interface{}), nil
+}
+
+// HINCRBY key field increment
+func (d *Dialer) HINCRBY(key string, field string, incr int) (int, error) {
+	cmd := []string{"HINCRBY", key, field, strconv.Itoa(incr)}
+	result, err := d.Resp.cmd(cmd)
+	if err != nil {
+		return -1, err
+	}
+	return result.(int), nil
+}
+
+// HSET key field value
+func (d *Dialer) HSET(key string, field string, val interface{}) (int, error) {
+	cmd := []string{"HSET", key, field, fmt.Sprint(val)}
+	result, err := d.Resp.cmd(cmd)
+	if err != nil {
+		return -1, err
+	}
+	return result.(int), nil
 }

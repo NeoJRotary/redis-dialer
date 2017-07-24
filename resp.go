@@ -1,7 +1,6 @@
 package redis
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"net"
@@ -23,9 +22,10 @@ type RESP struct {
 }
 
 type ioBuf struct {
-	cmd []byte
-	buf (chan []byte)
-	err (chan error)
+	cmd  []byte
+	data []interface{}
+	err  (chan error)
+	len  int
 }
 
 const crlf = "\r\n"
@@ -50,7 +50,33 @@ func newRESP(url string) (*RESP, error) {
 	return &r, nil
 }
 
-func (r *RESP) cmd(args []string) (data interface{}, err error) {
+func parseCmd(args []string) []byte {
+	cmd := []byte("*" + strconv.Itoa(len(args)) + crlf)
+	for _, v := range args {
+		cmd = append(cmd, []byte("$"+strconv.Itoa(len([]byte(v)))+crlf)...)
+		cmd = append(cmd, []byte(v+crlf)...)
+	}
+	return cmd
+}
+
+func (r *RESP) pipe(cmds [][]string) ([]interface{}, error) {
+	buf := parseCmd(cmds[0])
+	for _, s := range cmds[1:] {
+		buf = append(buf, []byte(crlf)...)
+		buf = append(buf, parseCmd(s)...)
+	}
+	return r.write(buf, len(cmds))
+}
+
+func (r *RESP) cmd(args []string) (interface{}, error) {
+	result, err := r.write(parseCmd(args), 1)
+	if err != nil {
+		return nil, err
+	}
+	return result[0], nil
+}
+
+func (r *RESP) write(cmd []byte, len int) ([]interface{}, error) {
 	r.mutex.Lock()
 	i := r.i
 	r.i++
@@ -59,28 +85,26 @@ func (r *RESP) cmd(args []string) (data interface{}, err error) {
 	}
 	r.mutex.Unlock()
 
-	cmd := []byte("*" + strconv.Itoa(len(args)) + crlf)
-	for _, v := range args {
-		cmd = append(cmd, []byte("$"+strconv.Itoa(len([]byte(v)))+crlf)...)
-		cmd = append(cmd, []byte(v+crlf)...)
-	}
-
 	r.ioBuf[i] = &ioBuf{
-		buf: make(chan []byte),
-		err: make(chan error),
-		cmd: cmd,
+		data: []interface{}{},
+		err:  make(chan error),
+		cmd:  cmd,
+		len:  len,
 	}
 
 	r.wBuf <- i
-
-	select {
-	case err = <-r.ioBuf[i].err:
-	case buf := <-r.ioBuf[i].buf:
-		data, err = decoder(buf)
+	err := <-r.ioBuf[i].err
+	if err != nil {
+		return nil, err
 	}
-	r.ioBuf[i].cmd = nil
-	r.ioBuf[i].buf = nil
-	r.ioBuf[i].err = nil
+	data := r.ioBuf[i].data
+
+	go func() {
+		r.ioBuf[i].data = nil
+		r.ioBuf[i].err = nil
+		r.ioBuf[i].cmd = nil
+		r.ioBuf[i].len = 0
+	}()
 
 	return data, err
 }
@@ -99,65 +123,42 @@ func (r *RESP) listen() {
 
 		timer = time.Now().Add(r.TimeoutR)
 		r.Conn.SetReadDeadline(timer)
-		n, err := r.Conn.Read(r.rBuf)
-		if err != nil {
-			r.ioBuf[i].err <- err
+
+		for {
+			n, err := r.Conn.Read(r.rBuf)
+			if err != nil {
+				r.ioBuf[i].err <- err
+			}
+			data, err := decoder(r.rBuf[:n])
+			if err != nil {
+				r.ioBuf[i].err <- err
+			}
+			r.ioBuf[i].data = append(r.ioBuf[i].data, data...)
+			if len(r.ioBuf[i].data) >= r.ioBuf[i].len {
+				r.ioBuf[i].err <- nil
+				break
+			}
 		}
-		r.ioBuf[i].buf <- r.rBuf[:n]
 	}
 }
 
-func decoder(buf []byte) (result interface{}, err error) {
-	scanner := bufio.NewScanner(bytes.NewBuffer(buf))
-	scanner.Split(splitFunc)
-	result, err = analyzer(scanner)
-	err = scanner.Err()
-	return result, err
-}
-
-func analyzer(scanner *bufio.Scanner) (result interface{}, err error) {
-	scanner.Scan()
-	data := scanner.Bytes()
-	if len(data) == 0 {
-		return result, err
-	}
-	switch data[0] {
-	case '-':
-		result = nil
-		err = errors.New(scanner.Text())
-	case '+':
-		result = string(data[1:])
-	case ':':
-		result, err = strconv.ParseInt(string(data[1:]), 10, 64)
-	case '$':
-		len := string(data[1:])
-		if len == "0" {
-			scanner.Scan()
-			result = ""
-		} else if len == "-1" {
-			result = nil
-		} else {
-			scanner.Scan()
-			result = string(scanner.Bytes()[0:])
-		}
-	case '*':
-		len := string(data[1:])
-		if len == "0" {
-			result = make([]interface{}, 0)
-		}
-		if len == "-1" {
-			result = nil
-		}
-		num, err := strconv.ParseInt(len, 10, 32)
+func decoder(buf []byte) ([]interface{}, error) {
+	newBuf := bytes.Split(buf, []byte{'\r', '\n'})
+	result := []interface{}{}
+	i := 0
+	for i != -1 {
+		data, j, err := analyzer(newBuf, i)
 		if err != nil {
 			return nil, err
 		}
-		result = make([]interface{}, num)
-		for i := range result.([]interface{}) {
-			result.([]interface{})[i], _ = analyzer(scanner)
+		if j == -1 {
+			i = -1
+		} else {
+			i = j + 1
+			result = append(result, data)
 		}
 	}
-	return result, err
+	return result, nil
 }
 
 /*
@@ -168,13 +169,49 @@ For Bulk Strings the first byte of the reply is "$"
 For Arrays the first byte of the reply is "*"
 */
 
-func splitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	i := bytes.Index(data, []byte{'\r', '\n'})
-	if i != -1 {
-		return i + 2, data[:i], nil
+func analyzer(buf [][]byte, index int) (interface{}, int, error) {
+	data := buf[index]
+	if len(data) == 0 {
+		return nil, -1, nil
 	}
-	if atEOF {
-		return 0, data, bufio.ErrFinalToken
+
+	switch data[0] {
+	case '-':
+		return nil, index, errors.New(string(data[1:]))
+	case '+':
+		return string(data[1:]), index, nil
+	case ':':
+		result, err := strconv.ParseInt(string(data[1:]), 10, 64)
+		if err != nil {
+			return nil, index, err
+		}
+		return result, index, nil
+	case '$':
+		len := string(data[1:])
+		if len == "-1" {
+			return nil, index, nil
+		}
+		index++
+		return string(buf[index]), index, nil
+	case '*':
+		len := string(data[1:])
+		if len == "-1" {
+			return nil, index, nil
+		}
+		num, err := strconv.ParseInt(len, 10, 32)
+		if err != nil {
+			return nil, index, err
+		}
+		result := make([]interface{}, num)
+		for i := range result {
+			index++
+			result[i], index, err = analyzer(buf, index)
+			if err != nil {
+				return nil, index, err
+			}
+		}
+		return result, index, nil
 	}
-	return 0, nil, nil
+
+	return nil, index, errors.New("RESP cant resolve incorrect response")
 }

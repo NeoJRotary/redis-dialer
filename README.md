@@ -1,4 +1,4 @@
-# Redis-Dialer 0.1.0
+# Redis-Dialer 0.2.0
 > Redis CMD funcs library and RESP client
 
 ### Methods
@@ -8,10 +8,20 @@ Return `*Dialer` with RESP client and CMD funcs.
   
 **func (\*Dialer) Close()**  
 Close RESP client.  
+  
+**func (\*Dialer) CMD(args ...string)**  
+Send Redis Command.   
+\> arge : spread string   
+  
+**func (\*Dialer) PIPELINE(cmds [][]string)**  
+Close RESP client.  
+\> cmds : string slice's slice  
    
-Now there is only few CMD funcs support, you can see detail in `redis.go`. If you create more CMD, I'm glad to merge it : )
+### Commands
+See detail or try searching in `redis.go`   
+Now there is only few Commands support. If you create more commands, I'm glad to merge it : )
 
-Simple Example : 
+### Simple Example : 
 ```
 package main
 
@@ -42,12 +52,22 @@ func main() {
 	}
     fmt.Println(result)
 
-    myhash, err := dialer.HGETALL("myhash")
+    myhash, err := dialer.CMD("HGETALL", "myhash")
     if err != nil {
 		fmt.Println("redis fail: " + err.Error())
 	}
     fmt.Println(myhash["apple"])
     fmt.Println(myhash["orange"])
+
+    result, err := dialer.PIPELINE([][]string{
+        []string{"PING"},
+        []string{"DBSIZE"},
+        []string{"PING"},
+    })
+    if err != nil {
+		fmt.Println("redis fail: " + err.Error())
+	}
+    fmt.Println(result)
 }
 
 ```
