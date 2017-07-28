@@ -28,19 +28,19 @@ package main
 import (
     "log"
 
-	redis "../redis-dialer"
+  redis "../redis-dialer"
 )
 
 func main() {
     dialer, err := redis.GetDialer("localhost:6379")
-	if err != nil {
-		log.Fatalln("redis fail: " + err.Error())
-	}
+  if err != nil {
+    log.Fatalln("redis fail: " + err.Error())
+  }
 
     num, err := dialer.DBSIZE()
-	if err != nil {
-		fmt.Println("redis fail: " + err.Error())
-	}
+  if err != nil {
+    fmt.Println("redis fail: " + err.Error())
+  }
     fmt.Println(num)
 
     result, err := dialer.HMSET("myhash", map[string]interface{}{
@@ -48,14 +48,14 @@ func main() {
         "orange": 4,
     })
     if err != nil {
-		fmt.Println("redis fail: " + err.Error())
-	}
+    fmt.Println("redis fail: " + err.Error())
+  }
     fmt.Println(result)
 
     myhash, err := dialer.CMD("HGETALL", "myhash")
     if err != nil {
-		fmt.Println("redis fail: " + err.Error())
-	}
+    fmt.Println("redis fail: " + err.Error())
+  }
     fmt.Println(myhash["apple"])
     fmt.Println(myhash["orange"])
 
@@ -65,8 +65,8 @@ func main() {
         []string{"PING"},
     })
     if err != nil {
-		fmt.Println("redis fail: " + err.Error())
-	}
+    fmt.Println("redis fail: " + err.Error())
+  }
     fmt.Println(result)
 }
 
