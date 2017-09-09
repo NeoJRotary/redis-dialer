@@ -3,6 +3,7 @@ package redis
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net"
 	"strconv"
 	"sync"
@@ -11,14 +12,18 @@ import (
 
 // RESP ...
 type RESP struct {
-	Conn     net.Conn
-	wBuf     chan uint32
-	rBuf     []byte
-	ioBuf    [100000]*ioBuf
-	i        uint32
-	mutex    *sync.Mutex
-	TimeoutR time.Duration
-	TimeoutW time.Duration
+	Conn        net.Conn
+	Connected   bool
+	wBuf        chan uint32
+	rBuf        []byte
+	ioBuf       [100000]*ioBuf
+	i           uint32
+	mutex       *sync.Mutex
+	TimeoutDial time.Duration
+	TimeoutR    time.Duration
+	TimeoutW    time.Duration
+	ReConnTime  int
+	URL         string
 }
 
 type ioBuf struct {
@@ -31,23 +36,44 @@ type ioBuf struct {
 const crlf = "\r\n"
 
 func newRESP(url string) (*RESP, error) {
-	conn, err := net.DialTimeout("tcp", url, 5*time.Second)
+	r := RESP{
+		Connected:   false,
+		i:           0,
+		TimeoutDial: 5 * time.Second,
+		TimeoutW:    1 * time.Second,
+		TimeoutR:    2 * time.Second,
+		ReConnTime:  2,
+		URL:         url,
+		wBuf:        make(chan uint32),
+		rBuf:        make([]byte, 65536),
+		mutex:       new(sync.Mutex),
+	}
+
+	err := r.dial()
 	if err != nil {
 		return nil, err
 	}
 
-	r := RESP{
-		Conn:     conn,
-		wBuf:     make(chan uint32),
-		rBuf:     make([]byte, 65536),
-		i:        0,
-		mutex:    new(sync.Mutex),
-		TimeoutW: 1 * time.Second,
-		TimeoutR: 2 * time.Second,
-	}
-
-	go r.listen()
 	return &r, nil
+}
+
+func (r *RESP) dial() (err error) {
+	r.Connected = false
+
+	count := 0
+	var conn net.Conn
+
+	for count < r.ReConnTime {
+		conn, err = net.DialTimeout("tcp", r.URL, r.TimeoutDial)
+		if err == nil {
+			r.Conn = conn
+			r.Connected = true
+			go r.listen()
+			return nil
+		}
+		count++
+	}
+	return err
 }
 
 func parseCmd(args []string) []byte {
@@ -77,6 +103,13 @@ func (r *RESP) cmd(args []string) (interface{}, error) {
 }
 
 func (r *RESP) write(cmd []byte, len int) ([]interface{}, error) {
+	if !r.Connected {
+		err := r.dial()
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	r.mutex.Lock()
 	i := r.i
 	r.i++
@@ -84,6 +117,8 @@ func (r *RESP) write(cmd []byte, len int) ([]interface{}, error) {
 		r.i = 0
 	}
 	r.mutex.Unlock()
+
+	defer r.releaseBuf(i)
 
 	r.ioBuf[i] = &ioBuf{
 		data: []interface{}{},
@@ -94,19 +129,25 @@ func (r *RESP) write(cmd []byte, len int) ([]interface{}, error) {
 
 	r.wBuf <- i
 	err := <-r.ioBuf[i].err
+	if err == io.EOF {
+		r.Conn.Close()
+		err = r.dial()
+		if err != nil {
+			return nil, err
+		}
+		r.wBuf <- i
+		err = <-r.ioBuf[i].err
+	}
 	if err != nil {
 		return nil, err
 	}
 	data := r.ioBuf[i].data
 
-	go func() {
-		r.ioBuf[i].data = nil
-		r.ioBuf[i].err = nil
-		r.ioBuf[i].cmd = nil
-		r.ioBuf[i].len = 0
-	}()
+	return data, nil
+}
 
-	return data, err
+func (r *RESP) releaseBuf(i uint32) {
+	r.ioBuf[i] = nil
 }
 
 func (r *RESP) listen() {
@@ -128,10 +169,12 @@ func (r *RESP) listen() {
 			n, err := r.Conn.Read(r.rBuf)
 			if err != nil {
 				r.ioBuf[i].err <- err
+				return
 			}
 			data, err := decoder(r.rBuf[:n])
 			if err != nil {
 				r.ioBuf[i].err <- err
+				break
 			}
 			r.ioBuf[i].data = append(r.ioBuf[i].data, data...)
 			if len(r.ioBuf[i].data) >= r.ioBuf[i].len {

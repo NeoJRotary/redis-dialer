@@ -38,6 +38,9 @@ func (d *Dialer) CMD(args ...string) (interface{}, error) {
 
 // PIPELINE str...
 func (d *Dialer) PIPELINE(cmds [][]string) ([]interface{}, error) {
+	if len(cmds) == 0 {
+		return nil, errors.New("empty cmds")
+	}
 	result, err := d.Resp.pipe(cmds)
 	if err != nil {
 		return nil, err
@@ -71,10 +74,14 @@ func (d *Dialer) HGET(key string, field string) (interface{}, error) {
 }
 
 // HMGET key field
-func (d *Dialer) HMGET(key string, field ...string) (interface{}, error) {
-	result, err := d.Resp.cmd(append([]string{"HMGET", key}, field...))
+func (d *Dialer) HMGET(key string, field ...string) (map[string]interface{}, error) {
+	values, err := d.Resp.cmd(append([]string{"HMGET", key}, field...))
 	if err != nil {
 		return nil, err
+	}
+	result := map[string]interface{}{}
+	for i, v := range values.([]interface{}) {
+		result[field[i]] = v
 	}
 	return result, nil
 }
@@ -124,6 +131,15 @@ func (d *Dialer) DEL(keys ...string) (int64, error) {
 // SADD key member [member ...]
 func (d *Dialer) SADD(key string, member ...string) (int64, error) {
 	result, err := d.Resp.cmd(append([]string{"SADD", key}, member...))
+	if err != nil {
+		return 0, err
+	}
+	return result.(int64), nil
+}
+
+// SREM key member [member ...]
+func (d *Dialer) SREM(key string, member ...string) (int64, error) {
+	result, err := d.Resp.cmd(append([]string{"SREM", key}, member...))
 	if err != nil {
 		return 0, err
 	}
@@ -207,6 +223,15 @@ func (d *Dialer) LPUSH(key string, values ...string) (int64, error) {
 	return result.(int64), nil
 }
 
+// LPOP key
+func (d *Dialer) LPOP(key string) (string, error) {
+	result, err := d.Resp.cmd([]string{"LPOP", key})
+	if err != nil {
+		return "", err
+	}
+	return result.(string), nil
+}
+
 // LTRIM key start stop
 func (d *Dialer) LTRIM(key string, start int, stop int) (string, error) {
 	cmd := []string{"LTRIM", key, strconv.Itoa(start), strconv.Itoa(stop)}
@@ -245,4 +270,14 @@ func (d *Dialer) HSET(key string, field string, val interface{}) (int, error) {
 		return -1, err
 	}
 	return result.(int), nil
+}
+
+// SET key value [EX seconds] [PX milliseconds] [NX|XX]
+func (d *Dialer) SET(key string, val string, other ...string) (interface{}, error) {
+	return d.Resp.cmd(append([]string{"SET", key, val}, other...))
+}
+
+// GET key
+func (d *Dialer) GET(key string) (interface{}, error) {
+	return d.Resp.cmd([]string{"GET", key})
 }
